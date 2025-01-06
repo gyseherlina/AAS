@@ -1,87 +1,95 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 from tensorflow.keras.utils import to_categorical
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, f1_score
+from sklearn.model_selection import LeaveOneOut
 from emnist import extract_training_samples, extract_test_samples
 
-# Load EMNIST dataset (letters subset)
-print("Loading EMNIST dataset...")
-x_train, y_train = extract_training_samples('letters')
-x_test, y_test = extract_test_samples('letters')
+# Load EMNIST dataset
+def load_emnist():
+    # Extract samples for "ByClass" split of EMNIST
+    X_train, y_train = extract_training_samples('byclass')
+    X_test, y_test = extract_test_samples('byclass')
 
-# Normalize and preprocess data
-x_train = x_train / 255.0
-x_test = x_test / 255.0
-x_train = x_train.reshape(-1, 28, 28, 1)
-x_test = x_test.reshape(-1, 28, 28, 1)
+    # Normalize the images and reshape
+    X_train = X_train / 255.0
+    X_test = X_test / 255.0
+    X_train = X_train.reshape(-1, 28, 28, 1)
+    X_test = X_test.reshape(-1, 28, 28, 1)
 
-# Adjust labels to start from 0
-y_train -= 1
-y_test -= 1
+    # Convert labels to categorical
+    num_classes = len(np.unique(y_train))
+    y_train = to_categorical(y_train, num_classes)
+    y_test = to_categorical(y_test, num_classes)
 
-# Convert labels to one-hot encoding
-y_train_cat = to_categorical(y_train, num_classes=26)
-y_test_cat = to_categorical(y_test, num_classes=26)
+    return (X_train, y_train), (X_test, y_test), num_classes
 
-# Define CNN architecture
-def create_model():
-    model = models.Sequential([
-        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(28, 28, 1)),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation='relu'),
-        layers.MaxPooling2D((2, 2)),
-        layers.Flatten(),
-        layers.Dense(128, activation='relu'),
-        layers.Dense(26, activation='softmax')
+# Define the CNN architecture
+def create_cnn_model(input_shape, num_classes):
+    model = Sequential([
+        Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
+        MaxPooling2D((2, 2)),
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(num_classes, activation='softmax')
     ])
+    
     model.compile(optimizer='adam',
                   loss='categorical_crossentropy',
                   metrics=['accuracy'])
     return model
 
-# Leave-One-Out Cross-Validation
-print("Starting Leave-One-Out Cross-Validation (LOOCV)...")
-n_samples = x_train.shape[0]
-true_labels = []
-predicted_labels = []
+# Perform Leave-One-Out Cross-Validation
+def loocv_evaluation(X, y, model_fn):
+    loo = LeaveOneOut()
+    y_true, y_pred = [], []
 
-for i in range(n_samples):
-    # Leave one sample out
-    x_val = x_train[i:i+1]
-    y_val = y_train_cat[i:i+1]
-    x_train_cv = np.delete(x_train, i, axis=0)
-    y_train_cv = np.delete(y_train_cat, i, axis=0)
+    for train_index, test_index in loo.split(X):
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
 
-    # Train model
-    model = create_model()
-    model.fit(x_train_cv, y_train_cv, epochs=3, batch_size=64, verbose=0)
+        model = model_fn()
+        model.fit(X_train, y_train, epochs=1, verbose=0, batch_size=32)
 
-    # Evaluate on the left-out sample
-    y_pred = np.argmax(model.predict(x_val), axis=-1)
-    y_true = np.argmax(y_val, axis=-1)
+        pred = model.predict(X_test)
+        y_true.append(np.argmax(y_test, axis=1))
+        y_pred.append(np.argmax(pred, axis=1))
 
-    true_labels.append(y_true[0])
-    predicted_labels.append(y_pred[0])
+    return y_true, y_pred
 
-    if (i + 1) % 100 == 0:
-        print(f"Processed {i + 1}/{n_samples} samples...")
+# Main function
+def main():
+    # Load the dataset
+    (X_train, y_train), (X_test, y_test), num_classes = load_emnist()
 
-# Evaluation metrics
-print("\nEvaluating performance...")
-conf_matrix = confusion_matrix(true_labels, predicted_labels)
-print("Confusion Matrix:")
-print(conf_matrix)
+    # Define model function
+    input_shape = X_train.shape[1:]
+    model_fn = lambda: create_cnn_model(input_shape, num_classes)
 
-accuracy = np.trace(conf_matrix) / np.sum(conf_matrix)
-print(f"Accuracy: {accuracy:.4f}")
+    # Perform LOOCV (for demonstration, using a subset for speed)
+    subset_size = 100  # Adjust for speed in demonstration
+    X_subset, y_subset = X_train[:subset_size], y_train[:subset_size]
+    y_true, y_pred = loocv_evaluation(X_subset, y_subset, model_fn)
 
-classification_report_str = classification_report(true_labels, predicted_labels, target_names=[chr(i) for i in range(65, 91)])
-print("Classification Report:")
-print(classification_report_str)
+    # Evaluate performance
+    y_true = np.array(y_true).flatten()
+    y_pred = np.array(y_pred).flatten()
 
-# Save metrics
-with open("classification_report.txt", "w") as f:
-    f.write(classification_report_str)
+    conf_matrix = confusion_matrix(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, average='weighted')
+    f1 = f1_score(y_true, y_pred, average='weighted')
 
-# Note: This LOOCV implementation is computationally expensive. Consider using subsets or different strategies for larger datasets.
+    print("Confusion Matrix:\n", conf_matrix)
+    print("Accuracy:", accuracy)
+    print("Precision:", precision)
+    print("F1-Score:", f1)
+
+if __name__ == "__main__":
+    main()
+
